@@ -14,8 +14,10 @@ import tensorflow as tf
 
 from data_util import GeneratorEnqueuer
 
-tf.app.flags.DEFINE_string('training_data_path', '/data/ocr/icdar2015/',
+tf.app.flags.DEFINE_string('training_data_path', '/workspace/mnt/group/ocr/qiutairu/dataset/ICDAR_2015/ch4_training_images',
                            'training dataset to use')
+tf.app.flags.DEFINE_string('training_gt_path', '/workspace/mnt/group/ocr/qiutairu/dataset/ICDAR_2015/ch4_training_localization_transcription_gt',
+                           'ground truth of training dataset to use')
 tf.app.flags.DEFINE_integer('max_image_large_side', 1280,
                             'max image size of training')
 tf.app.flags.DEFINE_integer('max_text_size', 800,
@@ -39,6 +41,13 @@ def get_images():
         files.extend(glob.glob(
             os.path.join(FLAGS.training_data_path, '*.{}'.format(ext))))
     return files
+
+
+def get_images_icdar2015():
+    image_names = os.listdir(FLAGS.training_data_path)
+    image_names = [image_name for image_name in image_names if image_name[0] != '.']
+    image_names.sort()
+    return image_names
 
 
 def load_annoataion(p):
@@ -601,7 +610,8 @@ def generator(input_size=512, batch_size=32,
                 im = cv2.imread(im_fn)
                 # print im_fn
                 h, w, _ = im.shape
-                txt_fn = im_fn.replace(os.path.basename(im_fn).split('.')[1], 'txt')
+                # txt_fn = im_fn.replace(os.path.basename(im_fn).split('.')[1], 'txt')
+                txt_fn = os.path.join(FLAGS.training_gt_path, 'gt_'+os.path.basename(im_fn).split('.')[0]+'.txt')
                 if not os.path.exists(txt_fn):
                     print('text file {} does not exists'.format(txt_fn))
                     continue
@@ -741,4 +751,5 @@ def get_batch(num_workers, **kwargs):
 
 
 if __name__ == '__main__':
+    generator()
     pass
