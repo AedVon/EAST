@@ -45,7 +45,7 @@ def get_images():
 
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.training_data_path)
-    image_names = [image_name for image_name in image_names if image_name[0] != '.']
+    image_names = [os.path.join(FLAGS.training_data_path, image_name) for image_name in image_names if image_name[0] != '.']
     image_names.sort()
     return image_names
 

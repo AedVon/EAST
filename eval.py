@@ -8,7 +8,7 @@ import tensorflow as tf
 import locality_aware_nms as nms_locality
 import lanms
 
-tf.app.flags.DEFINE_string('test_data_path', '/tmp/ch4_test_images/images/', '')
+tf.app.flags.DEFINE_string('test_data_path', '/tmp/ch4_test_images/images/', 'the data of test images')
 tf.app.flags.DEFINE_string('gpu_list', '0', '')
 tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/east_icdar2015_resnet_v1_50_rbox/', '')
 tf.app.flags.DEFINE_string('output_dir', '/tmp/ch4_test_images/images/', '')
@@ -36,6 +36,13 @@ def get_images():
     return files
 
 
+def get_images_icdar2015():
+    image_names = os.listdir(FLAGS.test_data_path)
+    image_names = [os.path.join(FLAGS.test_data_path, image_name) for image_name in image_names if image_name[0] != '.']
+    image_names.sort()
+    return image_names
+
+
 def resize_image(im, max_side_len=2400):
     '''
     resize image to a size multiple of 32 which is required by the network
@@ -56,8 +63,10 @@ def resize_image(im, max_side_len=2400):
     resize_h = int(resize_h * ratio)
     resize_w = int(resize_w * ratio)
 
-    resize_h = resize_h if resize_h % 32 == 0 else (resize_h // 32 - 1) * 32
-    resize_w = resize_w if resize_w % 32 == 0 else (resize_w // 32 - 1) * 32
+    # resize_h = resize_h if resize_h % 32 == 0 else (resize_h // 32 - 1) * 32
+    # resize_w = resize_w if resize_w % 32 == 0 else (resize_w // 32 - 1) * 32
+    resize_h = resize_h if resize_h % 32 == 0 else (resize_h // 32) * 32
+    resize_w = resize_w if resize_w % 32 == 0 else (resize_w // 32) * 32
     im = cv2.resize(im, (int(resize_w), int(resize_h)))
 
     ratio_h = resize_h / float(h)
@@ -146,7 +155,8 @@ def main(argv=None):
             print('Restore from {}'.format(model_path))
             saver.restore(sess, model_path)
 
-            im_fn_list = get_images()
+            im_fn_list = get_images_icdar2015()
+            print(im_fn_list)
             for im_fn in im_fn_list:
                 im = cv2.imread(im_fn)[:, :, ::-1]
                 start_time = time.time()
