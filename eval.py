@@ -9,15 +9,18 @@ import locality_aware_nms as nms_locality
 import lanms
 
 tf.app.flags.DEFINE_string('test_data_path', '/tmp/ch4_test_images/images/', 'the data of test images')
+tf.app.flags.DEFINE_string('test_gt_path', None, 'the ground truth info of test images')
 tf.app.flags.DEFINE_string('gpu_list', '0', '')
 tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/east_icdar2015_resnet_v1_50_rbox/', '')
 tf.app.flags.DEFINE_string('output_dir', '/tmp/ch4_test_images/images/', '')
 tf.app.flags.DEFINE_bool('no_write_images', False, 'do not write images')
 
 import model
-from icdar import restore_rectangle
+from icdar import restore_rectangle, load_annoataion
 
 FLAGS = tf.app.flags.FLAGS
+
+DEBUG = True
 
 def get_images():
     '''
@@ -39,6 +42,8 @@ def get_images():
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.test_data_path)
     image_names = [os.path.join(FLAGS.test_data_path, image_name) for image_name in image_names if image_name[0] != '.']
+    if DEBUG:
+        image_names = image_names[:10]
     image_names.sort()
     return image_names
 
@@ -179,6 +184,18 @@ def main(argv=None):
                 duration = time.time() - start_time
                 print('[timing] {}'.format(duration))
 
+                # add ground truth info
+                if FLAGS.test_gt_path is not None:
+                    gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % (os.path.basename(im_fn).split('.')[0]))
+                    if not os.path.exists(gt_file):
+                        print('text file {} does not exists'.format(gt_file))
+                        continue
+                    text_polys, text_tags = load_annoataion(gt_file)
+                    for i, box in enumerate(text_polys):
+                        if not text_tags[i]:
+                            cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
+                                          color=(0, 0, 255), thickness=2)
+
                 # save to file
                 if boxes is not None:
                     res_file = os.path.join(
@@ -195,10 +212,29 @@ def main(argv=None):
                             f.write('{},{},{},{},{},{},{},{}\r\n'.format(
                                 box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1],
                             ))
-                            cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
+                            cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
+                                          color=(255, 255, 0), thickness=1)
+
                 if not FLAGS.no_write_images:
                     img_path = os.path.join(FLAGS.output_dir, os.path.basename(im_fn))
                     cv2.imwrite(img_path, im[:, :, ::-1])
+
+                if DEBUG:
+                    # im_resized.shape = (704, 1280, 3)
+                    # score.shape = (1, 176, 320, 1)
+                    # score_thresh = 0.8
+                    score_path = os.path.join(FLAGS.output_dir, '%s_score.jpg' % os.path.basename(im_fn).split('.')[0])
+                    score_thresh = 0.8
+                    score_mask = (score[0, :, :, 0] > score_thresh).astype(np.int32)*[255]
+                    score_mask = cv2.resize(score_mask, (im.shape[1], im.shape[0]),
+                                            interpolation=cv2.INTER_NEAREST)
+                    score_map = np.expand_dims(score_mask, axis=2)
+                    score_map = np.concatenate((score_map, np.zeros_like(score_map), np.zeros_like(score_map)),
+                                               axis=-1).astype(np.int32)
+                    based_im = im[:, :, ::-1].astype(np.int32)
+                    masked_im = cv2.addWeighted(based_im, 0.5, score_map, 0.5, 0)
+                    cv2.imwrite(score_path, masked_im)
+
 
 if __name__ == '__main__':
     tf.app.run()
