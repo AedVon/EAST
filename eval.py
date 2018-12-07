@@ -16,11 +16,11 @@ tf.app.flags.DEFINE_string('output_dir', '/tmp/ch4_test_images/images/', '')
 tf.app.flags.DEFINE_bool('no_write_images', False, 'do not write images')
 
 import model
-from icdar import restore_rectangle, load_annoataion
+from icdar import restore_rectangle, load_annoataion, shrink_poly
 
 FLAGS = tf.app.flags.FLAGS
 
-DEBUG = True
+DEBUG = False
 
 def get_images():
     '''
@@ -42,8 +42,8 @@ def get_images():
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.test_data_path)
     image_names = [os.path.join(FLAGS.test_data_path, image_name) for image_name in image_names if image_name[0] != '.']
-    if DEBUG:
-        image_names = image_names[:10]
+    # if DEBUG:
+    #     image_names = image_names[:10]
     image_names.sort()
     return image_names
 
@@ -134,6 +134,19 @@ def sort_poly(p):
         return p[[0, 3, 2, 1]]
 
 
+def check_bbox(im, bbox):
+    refined_bbox = np.zeros_like(bbox)
+    for i, ordi in enumerate(bbox):
+        x = ordi[0]
+        y = ordi[1]
+        refined_x = x if x < im.shape[1] else im.shape[1]-1
+        refined_x = refined_x if refined_x > 0 else 0
+        refined_y = y if y < im.shape[0] else im.shape[0]-1
+        refined_y = refined_y if refined_y > 0 else 0
+        refined_bbox[i] = np.array([refined_x, refined_y])
+    return refined_bbox
+
+
 def main(argv=None):
     import os
     os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu_list
@@ -189,24 +202,40 @@ def main(argv=None):
                     gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % (os.path.basename(im_fn).split('.')[0]))
                     if not os.path.exists(gt_file):
                         print('text file {} does not exists'.format(gt_file))
-                        continue
-                    text_polys, text_tags = load_annoataion(gt_file)
-                    for i, box in enumerate(text_polys):
-                        if not text_tags[i]:
-                            cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
-                                          color=(0, 0, 255), thickness=2)
+                    else:
+                        text_polys, text_tags = load_annoataion(gt_file)
+                        for idx, box in enumerate(text_polys):
+                            if not text_tags[idx]:
+                                cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
+                                              color=(0, 0, 255), thickness=2)
+
+                                if DEBUG:
+                                    ######################################
+                                    # draw shrinked gt-box
+                                    ######################################
+                                    r = [None, None, None, None]
+                                    for i in range(4):
+                                        r[i] = min(np.linalg.norm(box[i] - box[(i + 1) % 4]),
+                                                   np.linalg.norm(box[i] - box[(i - 1) % 4]))
+                                    # score map
+                                    shrinked_poly = shrink_poly(box.copy(), r).astype(np.int32)[np.newaxis, :, :]
+                                    cv2.polylines(im[:, :, ::-1], [shrinked_poly.astype(np.int32).reshape((-1, 1, 2))], True,
+                                                  color=(0, 0, 255), thickness=1)
 
                 # save to file
-                if boxes is not None:
-                    res_file = os.path.join(
-                        FLAGS.output_dir,
-                        '{}.txt'.format(
-                            os.path.basename(im_fn).split('.')[0]))
+                if not os.path.exists(os.path.join(FLAGS.output_dir, 'txt')):
+                    os.mkdir(os.path.join(FLAGS.output_dir, 'txt'))
+                res_file = os.path.join(
+                    FLAGS.output_dir, 'txt',
+                    'res_{}.txt'.format(
+                        os.path.basename(im_fn).split('.')[0]))
 
-                    with open(res_file, 'w') as f:
+                with open(res_file, 'w') as f:
+                    if boxes is not None:
                         for box in boxes:
                             # to avoid submitting errors
                             box = sort_poly(box.astype(np.int32))
+                            box = check_bbox(im, box)
                             if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
                                 continue
                             f.write('{},{},{},{},{},{},{},{}\r\n'.format(
@@ -220,19 +249,21 @@ def main(argv=None):
                     cv2.imwrite(img_path, im[:, :, ::-1])
 
                 if DEBUG:
+                    ######################################
+                    # draw masked_image
+                    ######################################
                     # im_resized.shape = (704, 1280, 3)
                     # score.shape = (1, 176, 320, 1)
-                    # score_thresh = 0.8
-                    score_path = os.path.join(FLAGS.output_dir, '%s_score.jpg' % os.path.basename(im_fn).split('.')[0])
                     score_thresh = 0.8
                     score_mask = (score[0, :, :, 0] > score_thresh).astype(np.int32)*[255]
                     score_mask = cv2.resize(score_mask, (im.shape[1], im.shape[0]),
                                             interpolation=cv2.INTER_NEAREST)
-                    score_map = np.expand_dims(score_mask, axis=2)
+                    score_map = np.expand_dims(score_mask, axis=-1)
                     score_map = np.concatenate((score_map, np.zeros_like(score_map), np.zeros_like(score_map)),
                                                axis=-1).astype(np.int32)
                     based_im = im[:, :, ::-1].astype(np.int32)
-                    masked_im = cv2.addWeighted(based_im, 0.5, score_map, 0.5, 0)
+                    masked_im = cv2.addWeighted(based_im, 0.5, score_map, 0.5, gamma=0)
+                    score_path = os.path.join(FLAGS.output_dir, '%s_score.jpg' % os.path.basename(im_fn).split('.')[0])
                     cv2.imwrite(score_path, masked_im)
 
 

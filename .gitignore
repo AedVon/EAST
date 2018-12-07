@@ -110,3 +110,4 @@ static/results
 tmp/
 .DS_Store
 .idea/
+vis_result/
