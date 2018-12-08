@@ -14,6 +14,7 @@ import tensorflow as tf
 
 from data_util import GeneratorEnqueuer
 
+tf.app.flags.DEFINE_string('dataset', 'icdar2015', 'name of dataset to use')
 tf.app.flags.DEFINE_string('training_data_path', '/workspace/mnt/group/ocr/qiutairu/dataset/ICDAR_2015/ch4_training_images',
                            'training dataset to use')
 tf.app.flags.DEFINE_string('training_gt_path', '/workspace/mnt/group/ocr/qiutairu/dataset/ICDAR_2015/ch4_training_localization_transcription_gt',
@@ -43,6 +44,16 @@ def get_images():
     return files
 
 
+def get_gt_txt(img_name):
+    if FLAGS.dataset == 'icdar2015':
+        gt_file = os.path.join(FLAGS.training_gt_path, 'gt_%s.txt' % img_name)
+    elif FLAGS.dataset == 'icdar2017rctw':
+        gt_file = os.path.join(FLAGS.training_gt_path, '%s.txt' % img_name)
+    else:
+        gt_file = os.path.join(FLAGS.training_gt_path, 'gt_%s.txt' % img_name)
+    return gt_file
+
+
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.training_data_path)
     image_names = [os.path.join(FLAGS.training_data_path, image_name) for image_name in image_names if image_name[0] != '.']
@@ -63,13 +74,18 @@ def load_annoataion(p):
     with open(p, 'r') as f:
         reader = csv.reader(f)
         for line in reader:
-            label = line[-1]
+            if FLAGS.dataset == 'icdar2015':
+                label = line[-1]
+            elif FLAGS.dataset == 'icdar2017rctw':
+                label = line[8]
+            else:
+                label = line[-1]
             # strip BOM. \ufeff for python3,  \xef\xbb\bf for python2
             line = [i.strip('\ufeff').strip('\xef\xbb\xbf') for i in line]
 
             x1, y1, x2, y2, x3, y3, x4, y4 = list(map(float, line[:8]))
             text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
-            if label == '*' or label == '###':
+            if label == '*' or label == '###' or label == '1':
                 text_tags.append(True)
             else:
                 text_tags.append(False)
@@ -593,7 +609,13 @@ def generator(input_size=512, batch_size=32,
               background_ratio=3./8,
               random_scale=np.array([0.5, 1, 2.0, 3.0]),
               vis=False):
-    image_list = np.array(get_images())
+    if FLAGS.dataset == 'icdar2015':
+        image_list = np.array(get_images_icdar2015())
+    elif FLAGS.dataset == 'icdar2017rctw':
+        image_list = np.array(get_images_icdar2015())
+    else:
+        image_list = np.array(get_images())
+
     print('{} training images in {}'.format(
         image_list.shape[0], FLAGS.training_data_path))
     index = np.arange(0, image_list.shape[0])
@@ -611,13 +633,13 @@ def generator(input_size=512, batch_size=32,
                 # print im_fn
                 h, w, _ = im.shape
                 # txt_fn = im_fn.replace(os.path.basename(im_fn).split('.')[1], 'txt')
-                txt_fn = os.path.join(FLAGS.training_gt_path, 'gt_%s.txt' % os.path.basename(im_fn).split('.')[0])
+                # txt_fn = os.path.join(FLAGS.training_gt_path, 'gt_%s.txt' % os.path.basename(im_fn).split('.')[0])
+                txt_fn = get_gt_txt(os.path.basename(im_fn).split('.')[0])
                 if not os.path.exists(txt_fn):
                     print('text file {} does not exists'.format(txt_fn))
                     continue
 
                 text_polys, text_tags = load_annoataion(txt_fn)
-
                 text_polys, text_tags = check_and_validate_polys(text_polys, text_tags, (h, w))
                 # if text_polys.shape[0] == 0:
                 #     continue

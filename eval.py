@@ -39,12 +39,22 @@ def get_images():
     return files
 
 
+def get_gt_txt(img_name):
+    if FLAGS.dataset == 'icdar2015':
+        gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % img_name)
+    elif FLAGS.dataset == 'icdar2017rctw':
+        gt_file = os.path.join(FLAGS.test_gt_path, '%s.txt' % img_name)
+    else:
+        gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % img_name)
+    return gt_file
+
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.test_data_path)
     image_names = [os.path.join(FLAGS.test_data_path, image_name) for image_name in image_names if image_name[0] != '.']
-    # if DEBUG:
-    #     image_names = image_names[:10]
+    if DEBUG:
+        image_names = image_names[:10]
     image_names.sort()
+    print('Find {} images'.format(len(image_names)))
     return image_names
 
 
@@ -199,7 +209,7 @@ def main(argv=None):
 
                 # add ground truth info
                 if FLAGS.test_gt_path is not None:
-                    gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % (os.path.basename(im_fn).split('.')[0]))
+                    gt_file = get_gt_txt(os.path.basename(im_fn).split('.')[0])
                     if not os.path.exists(gt_file):
                         print('text file {} does not exists'.format(gt_file))
                     else:
@@ -208,19 +218,6 @@ def main(argv=None):
                             if not text_tags[idx]:
                                 cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
                                               color=(0, 0, 255), thickness=2)
-
-                                if DEBUG:
-                                    ######################################
-                                    # draw shrinked gt-box
-                                    ######################################
-                                    r = [None, None, None, None]
-                                    for i in range(4):
-                                        r[i] = min(np.linalg.norm(box[i] - box[(i + 1) % 4]),
-                                                   np.linalg.norm(box[i] - box[(i - 1) % 4]))
-                                    # score map
-                                    shrinked_poly = shrink_poly(box.copy(), r).astype(np.int32)[np.newaxis, :, :]
-                                    cv2.polylines(im[:, :, ::-1], [shrinked_poly.astype(np.int32).reshape((-1, 1, 2))], True,
-                                                  color=(0, 0, 255), thickness=1)
 
                 # save to file
                 if not os.path.exists(os.path.join(FLAGS.output_dir, 'txt')):
@@ -235,7 +232,7 @@ def main(argv=None):
                         for box in boxes:
                             # to avoid submitting errors
                             box = sort_poly(box.astype(np.int32))
-                            box = check_bbox(im, box)
+                            # box = check_bbox(im, box)
                             if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
                                 continue
                             f.write('{},{},{},{},{},{},{},{}\r\n'.format(
@@ -249,6 +246,27 @@ def main(argv=None):
                     cv2.imwrite(img_path, im[:, :, ::-1])
 
                 if DEBUG:
+                    ######################################
+                    # draw shrinked gt-box
+                    ######################################
+                    if FLAGS.test_gt_path is not None:
+                        gt_file = get_gt_txt(os.path.basename(im_fn).split('.')[0])
+                        if not os.path.exists(gt_file):
+                            print('text file {} does not exists'.format(gt_file))
+                        else:
+                            text_polys, text_tags = load_annoataion(gt_file)
+                            for idx, box in enumerate(text_polys):
+                                if not text_tags[idx]:
+                                    r = [None, None, None, None]
+                                    for i in range(4):
+                                        r[i] = min(np.linalg.norm(box[i] - box[(i + 1) % 4]),
+                                                   np.linalg.norm(box[i] - box[(i - 1) % 4]))
+                                    # shrink to 0.3
+                                    shrinked_poly = shrink_poly(box.copy(), r).astype(np.int32)[np.newaxis, :, :]
+                                    cv2.polylines(im[:, :, ::-1],
+                                                  [shrinked_poly.astype(np.int32).reshape((-1, 1, 2))], True,
+                                                  color=(0, 0, 255), thickness=1)
+
                     ######################################
                     # draw masked_image
                     ######################################
