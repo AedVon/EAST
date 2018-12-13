@@ -29,12 +29,9 @@ def tower_loss(images, score_maps, geo_maps, training_masks, reuse_variables=Non
     with tf.variable_scope(tf.get_variable_scope(), reuse=reuse_variables):
         f_score, f_geometry = model.model(images, is_training=True)
 
-    # model_loss = model.loss(score_maps, f_score,
-    #                         geo_maps, f_geometry,
-    #                         training_masks)
-    model_loss = model.loss_new(score_maps, f_score,
-                                geo_maps, f_geometry,
-                                training_masks)
+    model_loss = model.loss(score_maps, f_score,
+                            geo_maps, f_geometry,
+                            training_masks)
 
     total_loss = tf.add_n([model_loss] + tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
 

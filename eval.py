@@ -7,6 +7,8 @@ import tensorflow as tf
 
 import locality_aware_nms as nms_locality
 import lanms
+import decode_mask
+import json
 
 tf.app.flags.DEFINE_string('test_data_path', '/tmp/ch4_test_images/images/', 'the data of test images')
 tf.app.flags.DEFINE_string('test_gt_path', None, 'the ground truth info of test images')
@@ -14,13 +16,15 @@ tf.app.flags.DEFINE_string('gpu_list', '0', '')
 tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/east_icdar2015_resnet_v1_50_rbox/', '')
 tf.app.flags.DEFINE_string('output_dir', '/tmp/ch4_test_images/images/', '')
 tf.app.flags.DEFINE_bool('no_write_images', False, 'do not write images')
+tf.app.flags.DEFINE_bool('write_json', False, 'do write json files')
 
 import model
 from icdar import restore_rectangle, load_annoataion, shrink_poly
 
 FLAGS = tf.app.flags.FLAGS
 
-DEBUG = False
+DEBUG = True
+
 
 def get_images():
     '''
@@ -47,6 +51,7 @@ def get_gt_txt(img_name):
     else:
         gt_file = os.path.join(FLAGS.test_gt_path, 'gt_%s.txt' % img_name)
     return gt_file
+
 
 def get_images_icdar2015():
     image_names = os.listdir(FLAGS.test_data_path)
@@ -90,9 +95,10 @@ def resize_image(im, max_side_len=2400):
     return im, (ratio_h, ratio_w)
 
 
-def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_thres=0.2):
+def detect(image, score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_thres=0.2):
     '''
     restore text boxes from score map and geo map
+    :param image:
     :param score_map:
     :param geo_map:
     :param timer:
@@ -112,18 +118,33 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
     start = time.time()
     text_box_restored = restore_rectangle(xy_text[:, ::-1]*4, geo_map[xy_text[:, 0], xy_text[:, 1], :]) # N*4*2
     print('{} text boxes before nms'.format(text_box_restored.shape[0]))
+    # boxes = np.zeros((text_box_restored.shape[0], 10), dtype=np.float32)
     boxes = np.zeros((text_box_restored.shape[0], 9), dtype=np.float32)
     boxes[:, :8] = text_box_restored.reshape((-1, 8))
     boxes[:, 8] = score_map[xy_text[:, 0], xy_text[:, 1]]
     timer['restore'] = time.time() - start
+    # # Re-Score
+    # start = time.time()
+    # boxes[:, 9] = rescore(image, boxes, score_map > score_map_thresh)
+    # timer['rescore'] = time.time() - start
+
     # nms part
     start = time.time()
     # boxes = nms_locality.nms_locality(boxes.astype(np.float64), nms_thres)
+    # boxes = nms_locality.standard_nms(boxes.astype(np.float64), nms_thres)
+    # boxes = nms_locality.two_criterion_nms(boxes.astype(np.float64), nms_thres)
     boxes = lanms.merge_quadrangle_n9(boxes.astype('float32'), nms_thres)
     timer['nms'] = time.time() - start
 
     if boxes.shape[0] == 0:
         return None, timer
+
+    # if DEBUG:
+    #     boxes = boxes[np.argsort(boxes[:, 8])[::-1]]
+    #     boxes = boxes[np.argsort(boxes[:, 9])[::-1]]
+    #     boxes = boxes[:10]
+    #     print('selected scores: ', boxes[:, 8])
+    #     print('selected rescores: ', boxes[:, 9])
 
     # here we filter some low score boxes by the average score map, this is different from the orginal paper
     for i, box in enumerate(boxes):
@@ -132,7 +153,7 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
         boxes[i, 8] = cv2.mean(score_map, mask)[0]
     boxes = boxes[boxes[:, 8] > box_thresh]
 
-    return boxes, timer
+    return boxes[:, :9], timer
 
 
 def sort_poly(p):
@@ -155,6 +176,44 @@ def check_bbox(im, bbox):
         refined_y = refined_y if refined_y > 0 else 0
         refined_bbox[i] = np.array([refined_x, refined_y])
     return refined_bbox
+
+
+def rescore(im, boxes, score_map):
+    # im.shape = (704, 1280)
+    # score_map.shape = (176, 320)
+    ratio = float(score_map.shape[0]) / float(im.shape[0])
+    min_x = np.minimum(np.minimum(boxes[:, 0], boxes[:, 2]), np.minimum(boxes[:, 4], boxes[:, 6]))*ratio
+    max_x = np.maximum(np.maximum(boxes[:, 0], boxes[:, 2]), np.maximum(boxes[:, 4], boxes[:, 6]))*ratio
+    min_y = np.minimum(np.minimum(boxes[:, 1], boxes[:, 3]), np.minimum(boxes[:, 5], boxes[:, 7]))*ratio
+    max_y = np.maximum(np.maximum(boxes[:, 1], boxes[:, 3]), np.maximum(boxes[:, 5], boxes[:, 7]))*ratio
+
+    min_x = np.maximum(min_x, np.zeros_like(min_x))
+    max_x = np.minimum(max_x, np.full_like(max_x, score_map.shape[1]))
+    min_y = np.maximum(min_y, np.zeros_like(min_y))
+    max_y = np.minimum(max_y, np.full_like(max_y, score_map.shape[0]))
+
+    # decode score_map to score_mask
+    score_mask = decode_mask.decode_image_by_join(score_map)
+    cluster_num = score_mask.max()
+    score_sum = np.sum(score_mask > 0)
+
+    # calc score_sum of each rect
+    rect_mask = np.zeros((boxes.shape[0], score_map.shape[0], score_map.shape[1]), dtype=np.uint8)
+    area_intersect = np.zeros((boxes.shape[0]))
+    for i, rect in enumerate(rect_mask):
+        rect[np.ix_(range(int(min_y[i]), int(max_y[i])), range(int(min_x[i]), int(max_x[i])))] = 1
+        max_area_intersect = 0
+        for cluster_idx in range(1, cluster_num+1):
+            cluster_mask = score_mask == cluster_idx
+            if np.sum(rect * cluster_mask) / score_sum > max_area_intersect:
+                area_intersect[i] = np.sum(rect * cluster_mask) / score_sum
+                max_area_intersect = area_intersect[i]
+
+    # we want the intersect area between rect and score map become larger
+    area_intersect_mean = np.mean(area_intersect)
+    area_intersect = [math.floor(1/(1+np.exp(-50*(item-area_intersect_mean)))*1000)/1000 for item in area_intersect]
+
+    return area_intersect
 
 
 def main(argv=None):
@@ -188,18 +247,20 @@ def main(argv=None):
             for im_fn in im_fn_list:
                 im = cv2.imread(im_fn)[:, :, ::-1]
                 start_time = time.time()
-                im_resized, (ratio_h, ratio_w) = resize_image(im)
+                # im_resized, (ratio_h, ratio_w) = resize_image(im)
+                im_resized, (ratio_h, ratio_w) = resize_image(im, max_side_len=1280)
 
-                timer = {'net': 0, 'restore': 0, 'nms': 0}
+                timer = {'net': 0, 'restore': 0, 'rescore': 0, 'nms': 0}
                 start = time.time()
                 score, geometry = sess.run([f_score, f_geometry], feed_dict={input_images: [im_resized]})
                 timer['net'] = time.time() - start
 
-                boxes, timer = detect(score_map=score, geo_map=geometry, timer=timer)
-                print('{} : net {:.0f}ms, restore {:.0f}ms, nms {:.0f}ms'.format(
-                    im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000))
+                boxes, timer = detect(image=im_resized, score_map=score, geo_map=geometry, timer=timer)
+                print('{} : net {:.0f}ms, restore {:.0f}ms, rescore {:.0f}ms, nms {:.0f}ms'.format(
+                    im_fn, timer['net']*1000, timer['restore']*1000, timer['rescore']*1000, timer['nms']*1000))
 
                 if boxes is not None:
+                    scores = boxes[:, 8]
                     boxes = boxes[:, :8].reshape((-1, 4, 2))
                     boxes[:, :, 0] /= ratio_w
                     boxes[:, :, 1] /= ratio_h
@@ -219,31 +280,72 @@ def main(argv=None):
                                 cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
                                               color=(0, 0, 255), thickness=2)
 
-                # save to file
+                # save to txt file
                 if not os.path.exists(os.path.join(FLAGS.output_dir, 'txt')):
                     os.mkdir(os.path.join(FLAGS.output_dir, 'txt'))
-                res_file = os.path.join(
-                    FLAGS.output_dir, 'txt',
-                    'res_{}.txt'.format(
-                        os.path.basename(im_fn).split('.')[0]))
+                if FLAGS.dataset == 'icdar2015':
+                    res_file = os.path.join(
+                        FLAGS.output_dir, 'txt',
+                        'res_{}.txt'.format(
+                            os.path.basename(im_fn).split('.')[0]))
+                elif FLAGS.dataset == 'icdar2017rctw':
+                    res_file = os.path.join(
+                        FLAGS.output_dir, 'txt',
+                        'task1_{}.txt'.format(
+                            os.path.basename(im_fn).split('.')[0]))
+                else:
+                    res_file = os.path.join(
+                        FLAGS.output_dir, 'txt',
+                        '{}.txt'.format(
+                            os.path.basename(im_fn).split('.')[0]))
 
                 with open(res_file, 'w') as f:
                     if boxes is not None:
-                        for box in boxes:
+                        for idx, box in enumerate(boxes):
                             # to avoid submitting errors
                             box = sort_poly(box.astype(np.int32))
                             # box = check_bbox(im, box)
                             if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
                                 continue
-                            f.write('{},{},{},{},{},{},{},{}\r\n'.format(
-                                box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1],
-                            ))
+                            if FLAGS.dataset == 'icdar2015':
+                                f.write('{},{},{},{},{},{},{},{}\r\n'.format(
+                                    box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0],
+                                    box[3, 1],
+                                ))
+                            elif FLAGS.dataset == 'icdar2017rctw':
+                                f.write('{},{},{},{},{},{},{},{},{:.3f}\r\n'.format(
+                                    box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0],
+                                    box[3, 1], scores[idx]
+                                ))
+
                             cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True,
                                           color=(255, 255, 0), thickness=1)
 
+                # write image
                 if not FLAGS.no_write_images:
                     img_path = os.path.join(FLAGS.output_dir, os.path.basename(im_fn))
                     cv2.imwrite(img_path, im[:, :, ::-1])
+
+                ######################################
+                # save to json file
+                ######################################
+                if FLAGS.write_json:
+                    # need to delete data.json first
+                    json_dict = {}
+                    url = "http://pddo5g9hj.bkt.clouddn.com/"
+                    json_dict['url'] = url + os.path.basename(im_fn)
+                    json_dict['texts'] = []
+                    if boxes is not None:
+                        for box in boxes:
+                            box = sort_poly(box.astype(np.int32))
+                            box = check_bbox(im, box)
+                            json_dict['texts'].append({
+                                "text": "abc",
+                                "bboxes": [int(ordi) for ordi in box.reshape((-1))]
+                            })
+                    with open(os.path.join(FLAGS.output_dir, 'data.json'), 'a') as f:
+                        json_str = json.dumps(json_dict)
+                        f.write(json_str+'\r\n')
 
                 if DEBUG:
                     ######################################
@@ -272,17 +374,18 @@ def main(argv=None):
                     ######################################
                     # im_resized.shape = (704, 1280, 3)
                     # score.shape = (1, 176, 320, 1)
-                    score_thresh = 0.8
-                    score_mask = (score[0, :, :, 0] > score_thresh).astype(np.int32)*[255]
-                    score_mask = cv2.resize(score_mask, (im.shape[1], im.shape[0]),
-                                            interpolation=cv2.INTER_NEAREST)
-                    score_map = np.expand_dims(score_mask, axis=-1)
-                    score_map = np.concatenate((score_map, np.zeros_like(score_map), np.zeros_like(score_map)),
-                                               axis=-1).astype(np.int32)
-                    based_im = im[:, :, ::-1].astype(np.int32)
-                    masked_im = cv2.addWeighted(based_im, 0.5, score_map, 0.5, gamma=0)
-                    score_path = os.path.join(FLAGS.output_dir, '%s_score.jpg' % os.path.basename(im_fn).split('.')[0])
-                    cv2.imwrite(score_path, masked_im)
+                    if not FLAGS.no_write_images:
+                        score_thresh = 0.8
+                        score_mask = (score[0, :, :, 0] > score_thresh).astype(np.int32)*[255]
+                        score_mask = cv2.resize(score_mask, (im.shape[1], im.shape[0]),
+                                                interpolation=cv2.INTER_NEAREST)
+                        score_map = np.expand_dims(score_mask, axis=-1)
+                        score_map = np.concatenate((score_map, np.zeros_like(score_map), np.zeros_like(score_map)),
+                                                   axis=-1).astype(np.int32)
+                        based_im = im[:, :, ::-1].astype(np.int32)
+                        masked_im = cv2.addWeighted(based_im, 0.5, score_map, 0.5, gamma=0)
+                        score_path = os.path.join(FLAGS.output_dir, '%s_score.jpg' % os.path.basename(im_fn).split('.')[0])
+                        cv2.imwrite(score_path, masked_im)
 
 
 if __name__ == '__main__':

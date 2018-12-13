@@ -35,6 +35,21 @@ def standard_nms(S, thres):
     return S[keep]
 
 
+def two_criterion_nms(S, thres):
+    S = S[np.argsort(S[:, 8])][::-1]    # order by score (higher better)
+    order = np.argsort(S[:, 9])[::-1]   # order by rescore (higher better)
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        ovr = np.array([intersection(S[i], S[t]) for t in order[1:]])
+
+        inds = np.where(ovr <= thres)[0]
+        order = order[inds+1]
+
+    return S[keep]
+
+
 def nms_locality(polys, thres=0.3):
     '''
     locality aware nms of EAST

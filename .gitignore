@@ -111,3 +111,5 @@ tmp/
 .DS_Store
 .idea/
 vis_result/
+demo_images/
+demo_result/
